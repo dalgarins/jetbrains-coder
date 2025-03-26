@@ -419,6 +419,15 @@ internal class CoderCLIManagerTest {
                     output = "multiple-agents",
                     remove = "blank",
                 ),
+                SSHTest(
+                    listOf(workspace),
+                    input = null,
+                    output = "wildcard",
+                    remove = "wildcard",
+                    features = Features(
+                        wildcardSSH = true,
+                    ),
+                ),
             )
 
         val newlineRe = "\r?\n".toRegex()
@@ -463,6 +472,19 @@ internal class CoderCLIManagerTest {
                         }
                     }
 
+            val inputConf =
+                Path.of("src/test/fixtures/inputs/").resolve(it.remove + ".conf").toFile().readText()
+                    .replace(newlineRe, System.lineSeparator())
+                    .replace("/tmp/coder-gateway/test.coder.invalid/config", escape(coderConfigPath.toString()))
+                    .replace("/tmp/coder-gateway/test.coder.invalid/coder-linux-amd64", escape(ccm.localBinaryPath.toString()))
+                    .let { conf ->
+                        if (it.sshLogDirectory != null) {
+                            conf.replace("/tmp/coder-gateway/test.coder.invalid/logs", it.sshLogDirectory.toString())
+                        } else {
+                            conf
+                        }
+                    }
+
             // Add workspaces.
             ccm.configSsh(
                 it.workspaces.flatMap { ws ->
@@ -487,8 +509,7 @@ internal class CoderCLIManagerTest {
             // Remove is the configuration we expect after removing.
             assertEquals(
                 settings.sshConfigPath.toFile().readText(),
-                Path.of("src/test/fixtures/inputs").resolve(it.remove + ".conf").toFile()
-                    .readText().replace(newlineRe, System.lineSeparator()),
+                inputConf
             )
         }
     }
@@ -804,7 +825,7 @@ internal class CoderCLIManagerTest {
             listOf(
                 Pair("2.5.0", Features(true)),
                 Pair("2.13.0", Features(true, true)),
-                Pair("4.9.0", Features(true, true)),
+                Pair("4.9.0", Features(true, true, true)),
                 Pair("2.4.9", Features(false)),
                 Pair("1.0.1", Features(false)),
             )

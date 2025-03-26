@@ -115,6 +115,7 @@ fun ensureCLI(
 data class Features(
     val disableAutostart: Boolean = false,
     val reportWorkspaceUsage: Boolean = false,
+    val wildcardSSH: Boolean = false,
 )
 
 /**
@@ -256,7 +257,6 @@ class CoderCLIManager(
         val host = deploymentURL.safeHost()
         val startBlock = "# --- START CODER JETBRAINS $host"
         val endBlock = "# --- END CODER JETBRAINS $host"
-        val isRemoving = workspaceNames.isEmpty()
         val baseArgs =
             listOfNotNull(
                 escape(localBinaryPath.toString()),
@@ -285,37 +285,58 @@ class CoderCLIManager(
             } else {
                 ""
             }
+        val sshOpts = """
+            ConnectTimeout 0
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            LogLevel ERROR
+            SetEnv CODER_SSH_SESSION_TYPE=JetBrains
+        """.trimIndent()
         val blockContent =
-            workspaceNames.joinToString(
-                System.lineSeparator(),
-                startBlock + System.lineSeparator(),
-                System.lineSeparator() + endBlock,
-                transform = {
+            if (feats.wildcardSSH) {
+                startBlock + System.lineSeparator() +
                     """
-                    Host ${getHostName(deploymentURL, it.first, currentUser, it.second)}
-                      ProxyCommand ${proxyArgs.joinToString(" ")} ${getWorkspaceParts(it.first, it.second)}
-                      ConnectTimeout 0
-                      StrictHostKeyChecking no
-                      UserKnownHostsFile /dev/null
-                      LogLevel ERROR
-                      SetEnv CODER_SSH_SESSION_TYPE=JetBrains
+                    Host ${getHostPrefix()}--*
+                      ProxyCommand ${proxyArgs.joinToString(" ")} --ssh-host-prefix ${getHostPrefix()}-- %h
                     """.trimIndent()
+                        .plus("\n" + sshOpts.prependIndent("  "))
                         .plus(extraConfig)
-                        .plus("\n")
+                        .plus("\n\n")
                         .plus(
                             """
-                            Host ${getBackgroundHostName(deploymentURL, it.first, currentUser, it.second)}
-                              ProxyCommand ${backgroundProxyArgs.joinToString(" ")} ${getWorkspaceParts(it.first, it.second)}
-                              ConnectTimeout 0
-                              StrictHostKeyChecking no
-                              UserKnownHostsFile /dev/null
-                              LogLevel ERROR
-                              SetEnv CODER_SSH_SESSION_TYPE=JetBrains
+                            Host ${getHostPrefix()}-bg--*
+                              ProxyCommand ${backgroundProxyArgs.joinToString(" ")} --ssh-host-prefix ${getHostPrefix()}-bg-- %h
                             """.trimIndent()
+                                .plus("\n" + sshOpts.prependIndent("  "))
                                 .plus(extraConfig),
-                        ).replace("\n", System.lineSeparator())
-                },
-            )
+                        ).replace("\n", System.lineSeparator()) +
+                    System.lineSeparator() + endBlock
+            } else if (workspaceNames.isEmpty()) {
+                ""
+            } else {
+                workspaceNames.joinToString(
+                    System.lineSeparator(),
+                    startBlock + System.lineSeparator(),
+                    System.lineSeparator() + endBlock,
+                    transform = {
+                        """
+                    Host ${getHostName(it.first, currentUser, it.second)}
+                      ProxyCommand ${proxyArgs.joinToString(" ")} ${getWorkspaceParts(it.first, it.second)}
+                        """.trimIndent()
+                            .plus("\n" + sshOpts.prependIndent("  "))
+                            .plus(extraConfig)
+                            .plus("\n")
+                            .plus(
+                                """
+                            Host ${getBackgroundHostName(it.first, currentUser, it.second)}
+                              ProxyCommand ${backgroundProxyArgs.joinToString(" ")} ${getWorkspaceParts(it.first, it.second)}
+                                """.trimIndent()
+                                    .plus("\n" + sshOpts.prependIndent("  "))
+                                    .plus(extraConfig),
+                            ).replace("\n", System.lineSeparator())
+                    },
+                )
+            }
 
         if (contents == null) {
             logger.info("No existing SSH config to modify")
@@ -324,6 +345,8 @@ class CoderCLIManager(
 
         val start = "(\\s*)$startBlock".toRegex().find(contents)
         val end = "$endBlock(\\s*)".toRegex().find(contents)
+
+        val isRemoving = blockContent.isEmpty()
 
         if (start == null && end == null && isRemoving) {
             logger.info("No workspaces and no existing config blocks to remove")
@@ -456,15 +479,13 @@ class CoderCLIManager(
      *
      * Throws if the command execution fails.
      */
-    fun startWorkspace(workspaceOwner: String, workspaceName: String): String {
-        return exec(
-            "--global-config",
-            coderConfigPath.toString(),
-            "start",
-            "--yes",
-            workspaceOwner+"/"+workspaceName,
-        )
-    }
+    fun startWorkspace(workspaceOwner: String, workspaceName: String): String = exec(
+        "--global-config",
+        coderConfigPath.toString(),
+        "start",
+        "--yes",
+        workspaceOwner + "/" + workspaceName,
+    )
 
     private fun exec(vararg args: String): String {
         val stdout =
@@ -489,39 +510,49 @@ class CoderCLIManager(
                 Features(
                     disableAutostart = version >= SemVer(2, 5, 0),
                     reportWorkspaceUsage = version >= SemVer(2, 13, 0),
+                    wildcardSSH = version >= SemVer(2, 19, 0),
                 )
             }
         }
+
+    /*
+     * This function returns the ssh-host-prefix used for Host entries.
+     */
+    fun getHostPrefix(): String = "coder-jetbrains-${deploymentURL.safeHost()}"
+
+    /**
+     * This function returns the ssh host name generated for connecting to the workspace.
+     */
+    fun getHostName(
+        workspace: Workspace,
+        currentUser: User,
+        agent: WorkspaceAgent,
+    ): String = if (features.wildcardSSH) {
+        "${getHostPrefix()}--${workspace.ownerName}--${workspace.name}.${agent.name}"
+    } else {
+        // For a user's own workspace, we use the old syntax without a username for backwards compatibility,
+        // since the user might have recent connections that still use the old syntax.
+        if (currentUser.username == workspace.ownerName) {
+            "coder-jetbrains--${workspace.name}.${agent.name}--${deploymentURL.safeHost()}"
+        } else {
+            "coder-jetbrains--${workspace.ownerName}--${workspace.name}.${agent.name}--${deploymentURL.safeHost()}"
+        }
+    }
+
+    fun getBackgroundHostName(
+        workspace: Workspace,
+        currentUser: User,
+        agent: WorkspaceAgent,
+    ): String = if (features.wildcardSSH) {
+        "${getHostPrefix()}-bg--${workspace.ownerName}--${workspace.name}.${agent.name}"
+    } else {
+        getHostName(workspace, currentUser, agent) + "--bg"
+    }
 
     companion object {
         val logger = Logger.getInstance(CoderCLIManager::class.java.simpleName)
 
         private val tokenRegex = "--token [^ ]+".toRegex()
-
-        /**
-         * This function returns the ssh host name generated for connecting to the workspace.
-         */
-        @JvmStatic
-        fun getHostName(
-            url: URL,
-            workspace: Workspace,
-            currentUser: User,
-            agent: WorkspaceAgent,
-        ): String =
-            // For a user's own workspace, we use the old syntax without a username for backwards compatibility,
-            // since the user might have recent connections that still use the old syntax.
-            if (currentUser.username == workspace.ownerName) {
-                "coder-jetbrains--${workspace.name}.${agent.name}--${url.safeHost()}"
-            } else {
-                "coder-jetbrains--${workspace.ownerName}--${workspace.name}.${agent.name}--${url.safeHost()}"
-            }
-
-        fun getBackgroundHostName(
-            url: URL,
-            workspace: Workspace,
-            currentUser: User,
-            agent: WorkspaceAgent,
-        ): String = getHostName(url, workspace, currentUser, agent) + "--bg"
 
         /**
          * This function returns the identifier for the workspace to pass to the
@@ -536,6 +567,18 @@ class CoderCLIManager(
         @JvmStatic
         fun getBackgroundHostName(
             hostname: String,
-        ): String = hostname + "--bg"
+        ): String {
+            val parts = hostname.split("--").toMutableList()
+            if (parts.size < 2) {
+                throw SSHConfigFormatException("Invalid hostname: $hostname")
+            }
+            // non-wildcard case
+            if (parts[0] == "coder-jetbrains") {
+                return hostname + "--bg"
+            }
+            // wildcard case
+            parts[0] += "-bg"
+            return parts.joinToString("--")
+        }
     }
 }

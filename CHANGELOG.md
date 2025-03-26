@@ -4,6 +4,32 @@
 
 ## Unreleased
 
+### Changed
+
+Retrieve workspace directly in link handler when using wildcardSSH feature
+
+## 2.19.0 - 2025-02-21
+
+### Added
+
+- Added functionality to show setup script error message to the end user.
+
+### Fixed
+
+- Fix bug where wildcard configs would not be written under certain conditions.
+
+## 2.18.1 - 2025-02-14
+
+### Changed
+
+- Update the `pluginUntilBuild` to latest EAP
+
+## 2.18.0 - 2025-02-04
+
+### Changed
+
+- Simplifies the written SSH config and avoids the need to make an API request for every workspace the filter returns.
+
 ## 2.17.0 - 2025-01-27
 
 ### Added
